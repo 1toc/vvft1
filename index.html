@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VVFT - VR視野検査システム</title>
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <style>
+        #ui-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            max-width: 300px;
+            z-index: 1000;
+        }
+        .status { margin: 10px 0; }
+        button {
+            margin: 5px;
+            padding: 10px 15px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover { background: #45a049; }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #results {
+            margin-top: 15px;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .result-good { color: #4CAF50; }
+        .result-bad { color: #f44336; }
+        .heatmap {
+            display: grid;
+            grid-template-columns: repeat(5, 30px);
+            gap: 2px;
+            margin-top: 10px;
+        }
+        .heatmap-cell {
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            border: 1px solid #666;
+        }
+    </style>
+</head>
+<body>
+    <a-scene>
+        <!-- カメラとコントローラー -->
+        <a-entity id="rig" position="0 1.6 0">
+            <a-entity id="camera" camera look-controls>
+                <!-- 中心固視点(赤い点) - カメラに追随 -->
+                <a-sphere id="fixation" position="0 0 -1" radius="0.02" color="#FF0000"></a-sphere>
+                
+                <!-- 指示テキスト -->
+                <a-text id="instruction" 
+                    value="検査開始ボタンを押してください&#10;見えたら右トリガー&#10;見えなかったら左トリガー" 
+                    position="0 0.3 -1.5" 
+                    align="center" 
+                    color="#FFFFFF" 
+                    width="1.5"></a-text>
+            </a-entity>
+            
+            <!-- コントローラー(Quest対応) -->
+            <a-entity id="rightController" oculus-touch-controls="hand: right"></a-entity>
+            <a-entity id="leftController" oculus-touch-controls="hand: left"></a-entity>
+        </a-entity>
+
+        <!-- 背景 -->
+        <a-sky color="#000000"></a-sky>
+
+        <!-- VR内UIパネル(左下に配置) -->
+        <a-entity id="ui-panel-vr" position="-1.5 0.8 -2">
+            <a-plane width="1.2" height="1.6" color="#222222" opacity="0.9"></a-plane>
+            
+            <!-- タイトル -->
+            <a-text value="VVFT 視野検査" position="0 0.7 0.01" align="center" color="#FFFFFF" width="1.5"></a-text>
+            
+            <!-- ステータス表示 -->
+            <a-text id="status-vr" value="状態: 待機中" position="0 0.5 0.01" align="center" color="#AAAAAA" width="1.2"></a-text>
+            <a-text id="progress-vr" value="進捗: 0/25" position="0 0.35 0.01" align="center" color="#AAAAAA" width="1.2"></a-text>
+            <a-text id="accuracy-vr" value="正答率: -" position="0 0.2 0.01" align="center" color="#AAAAAA" width="1.2"></a-text>
+            
+            <!-- ボタン（クリック可能） -->
+            <a-box id="startBtn-vr" position="0 -0.1 0.01" width="0.8" height="0.2" depth="0.05" 
+                   color="#4CAF50" class="clickable">
+                <a-text value="検査開始" position="0 0 0.03" align="center" color="#FFFFFF" width="1.5"></a-text>
+            </a-box>
+            
+            <a-box id="resetBtn-vr" position="0 -0.4 0.01" width="0.8" height="0.2" depth="0.05" 
+                   color="#CCCCCC" opacity="0.5" class="clickable">
+                <a-text value="リセット" position="0 0 0.03" align="center" color="#FFFFFF" width="1.5"></a-text>
+            </a-box>
+            
+            <a-box id="exportBtn-vr" position="0 -0.7 0.01" width="0.8" height="0.2" depth="0.05" 
+                   color="#CCCCCC" opacity="0.5" class="clickable">
+                <a-text value="結果出力" position="0 0 0.03" align="center" color="#FFFFFF" width="1.5"></a-text>
+            </a-box>
+        </a-entity>
+
+        <!-- 5×5グリッド(1-25) -->
+        <a-entity id="gridContainer"></a-entity>
+    </a-scene>
+
+    <script>
+        // グリッド設定
+        const gridSize = 5; // 5×5
+        const angleStep = 18; // 各数字間の角度(度)
+        const distance = 3; // カメラからの距離(m)
+        const stimulusDuration = 800; // 刺激提示時間(ms)
+        const interStimulusInterval = 1500; // 刺激間隔(ms)
+        
+        // 検査状態
+        let testRunning = false;
+        let currentTrial = 0;
+        let trialSequence = [];
+        let results = [];
+        let numberEntities = {};
+        let waitingForResponse = false;
+        let currentTarget = null;
+        let trialStartTime = 0;
+        
+        // 球面座標から直交座標への変換
+        function sphericalToCartesian(horizontal, vertical, r) {
+            const h = horizontal * Math.PI / 180;
+            const v = vertical * Math.PI / 180;
+            return {
+                x: r * Math.sin(h) * Math.cos(v),
+                y: r * Math.sin(v),
+                z: -r * Math.cos(h) * Math.cos(v)
+            };
+        }
+
+        // グリッド生成
+        function createGrid() {
+            const container = document.getElementById('gridContainer');
+            const centerIndex = Math.floor(gridSize / 2);
+            let number = 1;
+
+            for (let row = 0; row < gridSize; row++) {
+                for (let col = 0; col < gridSize; col++) {
+                    const horizontalAngle = (col - centerIndex) * angleStep;
+                    const verticalAngle = (centerIndex - row) * angleStep;
+                    const pos = sphericalToCartesian(horizontalAngle, verticalAngle, distance);
+                    
+                    const numberEntity = document.createElement('a-text');
+                    numberEntity.setAttribute('value', number.toString());
+                    // 垂直位置を調整：カメラの高さ(1.6m)を基準に、13番が中心になるように
+                    numberEntity.setAttribute('position', `${pos.x} ${pos.y + 1.6} ${pos.z}`);
+                    numberEntity.setAttribute('align', 'center');
+                    numberEntity.setAttribute('color', '#FFFFFF');
+                    numberEntity.setAttribute('width', '3');
+                    numberEntity.setAttribute('look-at', '#camera');
+                    numberEntity.setAttribute('visible', 'false'); // 初期状態は非表示
+                    
+                    // 位置情報を保存
+                    numberEntity.dataset.number = number;
+                    numberEntity.dataset.row = row;
+                    numberEntity.dataset.col = col;
+                    numberEntity.dataset.horizontalAngle = horizontalAngle;
+                    numberEntity.dataset.verticalAngle = verticalAngle;
+                    
+                    container.appendChild(numberEntity);
+                    numberEntities[number] = numberEntity;
+                    number++;
+                }
+            }
+            
+            console.log('5×5グリッド(1-25)を生成しました');
+        }
+
+        // 検査開始
+        function startTest() {
+            testRunning = true;
+            currentTrial = 0;
+            results = [];
+            
+            // ランダムな順序で試行リストを作成
+            trialSequence = Array.from({length: 25}, (_, i) => i + 1);
+            shuffleArray(trialSequence);
+            
+            document.getElementById('instruction').setAttribute('value', '中心の赤い点を見続けてください');
+            
+            updateVRUI();
+            
+            // 最初の試行を開始
+            setTimeout(nextTrial, 2000);
+        }
+
+        // 次の試行
+        function nextTrial() {
+            if (!testRunning || currentTrial >= trialSequence.length) {
+                finishTest();
+                return;
+            }
+            
+            currentTarget = trialSequence[currentTrial];
+            trialStartTime = Date.now();
+            waitingForResponse = false;
+            
+            // 刺激提示
+            numberEntities[currentTarget].setAttribute('visible', 'true');
+            
+            // 一定時間後に非表示
+            setTimeout(() => {
+                numberEntities[currentTarget].setAttribute('visible', 'false');
+                waitingForResponse = true;
+                
+                // タイムアウト処理（応答がない場合）
+                setTimeout(() => {
+                    if (waitingForResponse) {
+                        recordResponse('timeout');
+                    }
+                }, 3000);
+            }, stimulusDuration);
+            
+            updateProgress();
+        }
+
+        // 応答記録
+        function recordResponse(response) {
+            if (!waitingForResponse) return;
+            
+            waitingForResponse = false;
+            const reactionTime = Date.now() - trialStartTime - stimulusDuration;
+            
+            const target = currentTarget;
+            const entity = numberEntities[target];
+            
+            results.push({
+                trial: currentTrial + 1,
+                target: target,
+                row: parseInt(entity.dataset.row),
+                col: parseInt(entity.dataset.col),
+                horizontalAngle: parseFloat(entity.dataset.horizontalAngle),
+                verticalAngle: parseFloat(entity.dataset.verticalAngle),
+                response: response,
+                reactionTime: reactionTime,
+                timestamp: new Date().toISOString()
+            });
+            
+            currentTrial++;
+            updateProgress();
+            
+            // 次の試行へ
+            setTimeout(nextTrial, interStimulusInterval);
+        }
+
+        // 進捗更新
+        function updateProgress() {
+            updateVRUI();
+        }
+
+        // 検査終了
+        function finishTest() {
+            testRunning = false;
+            document.getElementById('instruction').setAttribute('value', '検査が完了しました');
+            
+            updateVRUI();
+            displayResults();
+        }
+
+        // 結果表示
+        function displayResults() {
+            const resultsDiv = document.getElementById('results');
+            const correct = results.filter(r => r.response === 'seen').length;
+            const missed = results.filter(r => r.response === 'not-seen').length;
+            const timeout = results.filter(r => r.response === 'timeout').length;
+            const accuracy = (correct / results.length * 100).toFixed(1);
+            
+            // 左右視野分析
+            const leftResults = results.filter(r => r.col < 2);
+            const rightResults = results.filter(r => r.col > 2);
+            const leftAccuracy = (leftResults.filter(r => r.response === 'seen').length / leftResults.length * 100).toFixed(1);
+            const rightAccuracy = (rightResults.filter(r => r.response === 'seen').length / rightResults.length * 100).toFixed(1);
+            
+            let html = `
+                <h4>検査結果</h4>
+                <div class="result-good">検出: ${correct}</div>
+                <div class="result-bad">見落とし: ${missed}</div>
+                <div>無応答: ${timeout}</div>
+                <div><strong>正答率: ${accuracy}%</strong></div>
+                <hr>
+                <div>左視野: ${leftAccuracy}%</div>
+                <div>右視野: ${rightAccuracy}%</div>
+                <hr>
+                <h4>ヒートマップ</h4>
+                <div class="heatmap">
+            `;
+            
+            // ヒートマップ生成
+            for (let i = 1; i <= 25; i++) {
+                const result = results.find(r => r.target === i);
+                let bgColor = '#333';
+                if (result) {
+                    if (result.response === 'seen') bgColor = '#4CAF50';
+                    else if (result.response === 'not-seen') bgColor = '#f44336';
+                    else bgColor = '#FF9800';
+                }
+                html += `<div class="heatmap-cell" style="background-color: ${bgColor}">${i}</div>`;
+            }
+            
+            html += '</div>';
+            resultsDiv.innerHTML = html;
+        }
+
+        // リセット
+        function resetTest() {
+            testRunning = false;
+            currentTrial = 0;
+            results = [];
+            waitingForResponse = false;
+            
+            document.getElementById('instruction').setAttribute('value', 
+                '検査開始ボタンを押してください\n見えたら右トリガー\n見えなかったら左トリガー');
+            
+            // すべての数字を非表示に
+            Object.values(numberEntities).forEach(entity => {
+                entity.setAttribute('visible', 'false');
+            });
+            
+            updateVRUI();
+        }
+
+        // 結果エクスポート
+        function exportResults() {
+            const csv = generateCSV();
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', `VVFT_results_${timestamp}.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            console.log('結果をエクスポートしました');
+        }
+
+        // CSV生成
+        function generateCSV() {
+            let csv = 'Trial,Target,Row,Col,HorizontalAngle,VerticalAngle,Response,ReactionTime,Timestamp\n';
+            results.forEach(r => {
+                csv += `${r.trial},${r.target},${r.row},${r.col},${r.horizontalAngle},${r.verticalAngle},${r.response},${r.reactionTime},${r.timestamp}\n`;
+            });
+            return csv;
+        }
+
+        // 配列シャッフル
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+
+        // コントローラー入力処理
+        window.addEventListener('load', function() {
+            createGrid();
+            
+            const rightController = document.getElementById('rightController');
+            const leftController = document.getElementById('leftController');
+            
+            // 右トリガー: 見えた
+            rightController.addEventListener('triggerdown', function() {
+                if (testRunning && waitingForResponse) {
+                    recordResponse('seen');
+                }
+            });
+            
+            // 左トリガー: 見えなかった
+            leftController.addEventListener('triggerdown', function() {
+                if (testRunning && waitingForResponse) {
+                    recordResponse('not-seen');
+                }
+            });
+            
+            // VRボタンのクリック処理
+            document.getElementById('startBtn-vr').addEventListener('click', startTest);
+            document.getElementById('resetBtn-vr').addEventListener('click', resetTest);
+            document.getElementById('exportBtn-vr').addEventListener('click', exportResults);
+            
+            // キーボード対応(デバッグ用)
+            document.addEventListener('keydown', function(e) {
+                if (testRunning && waitingForResponse) {
+                    if (e.key === 'ArrowRight' || e.key === 's') {
+                        recordResponse('seen');
+                    } else if (e.key === 'ArrowLeft' || e.key === 'n') {
+                        recordResponse('not-seen');
+                    }
+                }
+            });
+        });
+        
+        // VR UI更新関数
+        function updateVRUI() {
+            document.getElementById('status-vr').setAttribute('value', 
+                `状態: ${document.getElementById('status') ? document.getElementById('status').textContent : '待機中'}`);
+            document.getElementById('progress-vr').setAttribute('value', 
+                `進捗: ${currentTrial}/25`);
+            
+            if (results.length > 0) {
+                const correct = results.filter(r => r.response === 'seen').length;
+                const accuracy = (correct / results.length * 100).toFixed(1);
+                document.getElementById('accuracy-vr').setAttribute('value', `正答率: ${accuracy}%`);
+            } else {
+                document.getElementById('accuracy-vr').setAttribute('value', '正答率: -');
+            }
+            
+            // ボタンの有効/無効状態を反映
+            const startBtn = document.getElementById('startBtn-vr');
+            const resetBtn = document.getElementById('resetBtn-vr');
+            const exportBtn = document.getElementById('exportBtn-vr');
+            
+            if (testRunning) {
+                startBtn.setAttribute('color', '#CCCCCC');
+                startBtn.setAttribute('opacity', '0.5');
+                resetBtn.setAttribute('color', '#4CAF50');
+                resetBtn.setAttribute('opacity', '1');
+            } else {
+                startBtn.setAttribute('color', '#4CAF50');
+                startBtn.setAttribute('opacity', '1');
+                resetBtn.setAttribute('color', '#CCCCCC');
+                resetBtn.setAttribute('opacity', '0.5');
+            }
+            
+            if (results.length === 25 && !testRunning) {
+                exportBtn.setAttribute('color', '#2196F3');
+                exportBtn.setAttribute('opacity', '1');
+            } else {
+                exportBtn.setAttribute('color', '#CCCCCC');
+                exportBtn.setAttribute('opacity', '0.5');
+            }
+        }
+    </script>
+</body>
+</html>
