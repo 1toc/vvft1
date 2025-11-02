@@ -86,22 +86,22 @@
 
         <!-- VR内UIパネル(初期非表示、終了時に中央表示) -->
         <a-entity id="ui-panel-vr" position="0 1.6 -2" visible="false">
-            <a-plane width="1.5" height="1.2" color="#222222" opacity="0.9"></a-plane>
+            <a-plane width="2" height="1.5" color="#222222" opacity="0.9"></a-plane>
             
             <!-- タイトル -->
-            <a-text value="検査完了" position="0 0.45 0.01" align="center" color="#FFFFFF" width="2"></a-text>
+            <a-text value="検査完了" position="0 0.6 0.01" align="center" color="#00FF00" width="3"></a-text>
             
             <!-- 結果表示 -->
-            <a-text id="result-summary-vr" value="" position="0 0.25 0.01" align="center" color="#AAAAAA" width="1.8"></a-text>
-            <a-text id="result-details-vr" value="" position="0 0.05 0.01" align="center" color="#AAAAAA" width="1.8"></a-text>
+            <a-text id="result-summary-vr" value="結果を計算中..." position="0 0.3 0.01" align="center" color="#FFFFFF" width="2.5"></a-text>
+            <a-text id="result-details-vr" value="" position="0 0.0 0.01" align="center" color="#FFFF00" width="2.5"></a-text>
             
             <!-- ボタン -->
-            <a-box id="resetBtn-vr" position="0 -0.25 0.01" width="1" height="0.25" depth="0.05" 
+            <a-box id="resetBtn-vr" position="0 -0.35 0.01" width="1.2" height="0.3" depth="0.05" 
                    color="#4CAF50" class="clickable">
-                <a-text value="もう一度検査" position="0 0 0.03" align="center" color="#FFFFFF" width="2"></a-text>
+                <a-text value="もう一度検査" position="0 0 0.03" align="center" color="#FFFFFF" width="2.5"></a-text>
             </a-box>
             
-            <a-text value="PCで結果を確認してください" position="0 -0.5 0.01" align="center" color="#AAAAAA" width="1.5"></a-text>
+            <a-text value="PCで詳細結果を確認できます" position="0 -0.65 0.01" align="center" color="#AAAAAA" width="2.5"></a-text>
         </a-entity>
 
         <!-- 5×5グリッド(1-25) -->
@@ -127,6 +127,31 @@
         let waitingForResponse = false;
         let currentTarget = null;
         let trialStartTime = 0;
+        
+        // 音声コンテキスト（効果音用）
+        let audioContext = null;
+        
+        // ビープ音を鳴らす関数
+        function playBeep() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.frequency.value = 800; // 800Hz
+            oscillator.type = 'sine';
+            
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+            
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.1);
+        }
         
         // 球面座標から直交座標への変換
         function sphericalToCartesian(horizontal, vertical, r) {
@@ -179,6 +204,7 @@
 
         // 検査開始
         function startTest() {
+            console.log('startTest called, testRunning:', testRunning);
             if (testRunning) return; // 既に実行中なら何もしない
             
             testRunning = true;
@@ -188,6 +214,8 @@
             // ランダムな順序で試行リストを作成
             trialSequence = Array.from({length: 25}, (_, i) => i + 1);
             shuffleArray(trialSequence);
+            
+            console.log('Test started, trialSequence:', trialSequence);
             
             document.getElementById('instruction').setAttribute('value', '中心の赤い点を見続けてください');
             
@@ -206,8 +234,9 @@
             trialStartTime = Date.now();
             waitingForResponse = false;
             
-            // 色を緑に変更
+            // 色を緑に変更 & ビープ音を鳴らす
             numberEntities[currentTarget].setAttribute('color', targetColor);
+            playBeep();
             
             // 一定時間後に白に戻す
             setTimeout(() => {
@@ -264,6 +293,8 @@
             testRunning = false;
             document.getElementById('instruction').setAttribute('value', '');
             
+            console.log('Test finished, results:', results);
+            
             // 結果計算
             const correct = results.filter(r => r.response === 'detected').length;
             const missed = results.filter(r => r.response === 'missed').length;
@@ -276,14 +307,30 @@
             const leftAccuracy = leftResults.length > 0 ? (leftResults.filter(r => r.response === 'detected').length / leftResults.length * 100).toFixed(1) : 0;
             const rightAccuracy = rightResults.length > 0 ? (rightResults.filter(r => r.response === 'detected').length / rightResults.length * 100).toFixed(1) : 0;
             
+            const summaryText = `正答率: ${accuracy}%  (検出: ${correct} / 見落とし: ${missed} / 無応答: ${timeout})`;
+            const detailsText = `左視野: ${leftAccuracy}%  |  右視野: ${rightAccuracy}%`;
+            
+            console.log('Summary:', summaryText);
+            console.log('Details:', detailsText);
+            
             // VRメニューを表示して結果を表示
             const uiPanel = document.getElementById('ui-panel-vr');
-            uiPanel.setAttribute('visible', 'true');
+            const summaryElement = document.getElementById('result-summary-vr');
+            const detailsElement = document.getElementById('result-details-vr');
             
-            document.getElementById('result-summary-vr').setAttribute('value', 
-                `正答率: ${accuracy}%  (検出: ${correct} / 見落とし: ${missed} / 無応答: ${timeout})`);
-            document.getElementById('result-details-vr').setAttribute('value', 
-                `左視野: ${leftAccuracy}%  |  右視野: ${rightAccuracy}%`);
+            // 少し遅延させてから表示（A-Frameの更新を確実にするため）
+            setTimeout(() => {
+                uiPanel.setAttribute('visible', 'true');
+                
+                if (summaryElement) {
+                    summaryElement.setAttribute('value', summaryText);
+                    console.log('Summary element updated');
+                }
+                if (detailsElement) {
+                    detailsElement.setAttribute('value', detailsText);
+                    console.log('Details element updated');
+                }
+            }, 100);
             
             displayResults();
         }
@@ -389,49 +436,80 @@
         }
 
         // コントローラー入力処理
-        window.addEventListener('load', function() {
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM loaded');
+            
+            // A-Frameシーンのロード完了を待つ
+            const scene = document.querySelector('a-scene');
+            if (scene.hasLoaded) {
+                initControllers();
+            } else {
+                scene.addEventListener('loaded', initControllers);
+            }
+        });
+        
+        function initControllers() {
+            console.log('Initializing controllers');
             createGrid();
             
             const rightController = document.getElementById('rightController');
             const leftController = document.getElementById('leftController');
             
-            // 右トリガー: 待機中なら検査開始、検査中なら「色変化を検出」
-            rightController.addEventListener('triggerdown', function() {
-                if (!testRunning && !waitingForResponse) {
-                    // 待機中なら検査開始
-                    startTest();
-                } else if (testRunning && waitingForResponse) {
-                    // 検査中なら「色変化を検出した」
-                    recordResponse('detected');
-                }
-            });
+            if (rightController) {
+                console.log('Right controller found');
+                // 右トリガー: 待機中なら検査開始、検査中なら「色変化を検出」
+                rightController.addEventListener('triggerdown', function() {
+                    console.log('Right trigger pressed, testRunning:', testRunning, 'waitingForResponse:', waitingForResponse);
+                    if (!testRunning && !waitingForResponse) {
+                        // 待機中なら検査開始
+                        startTest();
+                    } else if (testRunning && waitingForResponse) {
+                        // 検査中なら「色変化を検出した」
+                        recordResponse('detected');
+                    }
+                });
+            }
             
-            // 左トリガー: 検査中なら「色変化を見落とした」
-            leftController.addEventListener('triggerdown', function() {
-                if (testRunning && waitingForResponse) {
-                    recordResponse('missed');
-                }
-            });
+            if (leftController) {
+                console.log('Left controller found');
+                // 左トリガー: 検査中なら「色変化を見落とした」
+                leftController.addEventListener('triggerdown', function() {
+                    console.log('Left trigger pressed');
+                    if (testRunning && waitingForResponse) {
+                        recordResponse('missed');
+                    }
+                });
+            }
             
             // VRボタンのクリック処理
-            document.getElementById('resetBtn-vr').addEventListener('click', function() {
-                resetTest();
-            });
+            const resetBtn = document.getElementById('resetBtn-vr');
+            if (resetBtn) {
+                resetBtn.addEventListener('click', function() {
+                    console.log('Reset button clicked');
+                    resetTest();
+                });
+            }
             
             // キーボード対応(デバッグ用)
             document.addEventListener('keydown', function(e) {
+                console.log('Key pressed:', e.key, 'testRunning:', testRunning, 'waitingForResponse:', waitingForResponse);
                 if (!testRunning && !waitingForResponse && e.key === ' ') {
                     // スペースキーで検査開始
+                    console.log('Starting test with spacebar');
                     startTest();
                 } else if (testRunning && waitingForResponse) {
                     if (e.key === 'ArrowRight' || e.key === 's') {
+                        console.log('Detected response');
                         recordResponse('detected');
                     } else if (e.key === 'ArrowLeft' || e.key === 'n') {
+                        console.log('Missed response');
                         recordResponse('missed');
                     }
                 }
             });
-        });
+            
+            console.log('Controllers initialized');
+        }
     </script>
 </body>
 </html>
