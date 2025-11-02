@@ -69,7 +69,7 @@
                 
                 <!-- 指示テキスト -->
                 <a-text id="instruction" 
-                    value="右トリガーを押すと検査開始&#10;&#10;見えたら右トリガー&#10;見えなかったら左トリガー" 
+                    value="右トリガーを押すと検査開始&#10;&#10;緑色に変わった数字があったら右トリガー&#10;何も変わらなかったら左トリガー" 
                     position="0 0.3 -1.5" 
                     align="center" 
                     color="#FFFFFF" 
@@ -113,8 +113,10 @@
         const gridSize = 5; // 5×5
         const angleStep = 18; // 各数字間の角度(度)
         const distance = 3; // カメラからの距離(m)
-        const stimulusDuration = 800; // 刺激提示時間(ms)
-        const interStimulusInterval = 1500; // 刺激間隔(ms)
+        const stimulusDuration = 1000; // 色変化の持続時間(ms)
+        const interStimulusInterval = 2000; // 刺激間隔(ms)
+        const targetColor = '#00FF00'; // 緑色（ターゲット色）
+        const normalColor = '#FFFFFF'; // 白色（通常色）
         
         // 検査状態
         let testRunning = false;
@@ -154,10 +156,10 @@
                     // 垂直位置を調整：カメラの高さ(1.6m)を基準に、全体を少し上げて見やすく
                     numberEntity.setAttribute('position', `${pos.x} ${pos.y + 1.9} ${pos.z}`);
                     numberEntity.setAttribute('align', 'center');
-                    numberEntity.setAttribute('color', '#FFFFFF');
+                    numberEntity.setAttribute('color', normalColor);
                     numberEntity.setAttribute('width', '3');
                     numberEntity.setAttribute('look-at', '#camera');
-                    numberEntity.setAttribute('visible', 'false'); // 初期状態は非表示
+                    numberEntity.setAttribute('visible', 'true'); // 常時表示
                     
                     // 位置情報を保存
                     numberEntity.dataset.number = number;
@@ -204,12 +206,12 @@
             trialStartTime = Date.now();
             waitingForResponse = false;
             
-            // 刺激提示
-            numberEntities[currentTarget].setAttribute('visible', 'true');
+            // 色を緑に変更
+            numberEntities[currentTarget].setAttribute('color', targetColor);
             
-            // 一定時間後に非表示
+            // 一定時間後に白に戻す
             setTimeout(() => {
-                numberEntities[currentTarget].setAttribute('visible', 'false');
+                numberEntities[currentTarget].setAttribute('color', normalColor);
                 waitingForResponse = true;
                 
                 // タイムアウト処理（応答がない場合）
@@ -240,7 +242,7 @@
                 col: parseInt(entity.dataset.col),
                 horizontalAngle: parseFloat(entity.dataset.horizontalAngle),
                 verticalAngle: parseFloat(entity.dataset.verticalAngle),
-                response: response,
+                response: response, // 'detected'(検出), 'missed'(見落とし), 'timeout'(無応答)
                 reactionTime: reactionTime,
                 timestamp: new Date().toISOString()
             });
@@ -263,16 +265,16 @@
             document.getElementById('instruction').setAttribute('value', '');
             
             // 結果計算
-            const correct = results.filter(r => r.response === 'seen').length;
-            const missed = results.filter(r => r.response === 'not-seen').length;
+            const correct = results.filter(r => r.response === 'detected').length;
+            const missed = results.filter(r => r.response === 'missed').length;
             const timeout = results.filter(r => r.response === 'timeout').length;
             const accuracy = (correct / results.length * 100).toFixed(1);
             
             // 左右視野分析
             const leftResults = results.filter(r => r.col < 2);
             const rightResults = results.filter(r => r.col > 2);
-            const leftAccuracy = leftResults.length > 0 ? (leftResults.filter(r => r.response === 'seen').length / leftResults.length * 100).toFixed(1) : 0;
-            const rightAccuracy = rightResults.length > 0 ? (rightResults.filter(r => r.response === 'seen').length / rightResults.length * 100).toFixed(1) : 0;
+            const leftAccuracy = leftResults.length > 0 ? (leftResults.filter(r => r.response === 'detected').length / leftResults.length * 100).toFixed(1) : 0;
+            const rightAccuracy = rightResults.length > 0 ? (rightResults.filter(r => r.response === 'detected').length / rightResults.length * 100).toFixed(1) : 0;
             
             // VRメニューを表示して結果を表示
             const uiPanel = document.getElementById('ui-panel-vr');
@@ -289,16 +291,18 @@
         // 結果表示
         function displayResults() {
             const resultsDiv = document.getElementById('results');
-            const correct = results.filter(r => r.response === 'seen').length;
-            const missed = results.filter(r => r.response === 'not-seen').length;
+            if (!resultsDiv) return; // VRモードでは存在しない場合がある
+            
+            const correct = results.filter(r => r.response === 'detected').length;
+            const missed = results.filter(r => r.response === 'missed').length;
             const timeout = results.filter(r => r.response === 'timeout').length;
             const accuracy = (correct / results.length * 100).toFixed(1);
             
             // 左右視野分析
             const leftResults = results.filter(r => r.col < 2);
             const rightResults = results.filter(r => r.col > 2);
-            const leftAccuracy = (leftResults.filter(r => r.response === 'seen').length / leftResults.length * 100).toFixed(1);
-            const rightAccuracy = (rightResults.filter(r => r.response === 'seen').length / rightResults.length * 100).toFixed(1);
+            const leftAccuracy = (leftResults.filter(r => r.response === 'detected').length / leftResults.length * 100).toFixed(1);
+            const rightAccuracy = (rightResults.filter(r => r.response === 'detected').length / rightResults.length * 100).toFixed(1);
             
             let html = `
                 <h4>検査結果</h4>
@@ -319,8 +323,8 @@
                 const result = results.find(r => r.target === i);
                 let bgColor = '#333';
                 if (result) {
-                    if (result.response === 'seen') bgColor = '#4CAF50';
-                    else if (result.response === 'not-seen') bgColor = '#f44336';
+                    if (result.response === 'detected') bgColor = '#4CAF50';
+                    else if (result.response === 'missed') bgColor = '#f44336';
                     else bgColor = '#FF9800';
                 }
                 html += `<div class="heatmap-cell" style="background-color: ${bgColor}">${i}</div>`;
@@ -341,11 +345,11 @@
             document.getElementById('ui-panel-vr').setAttribute('visible', 'false');
             
             document.getElementById('instruction').setAttribute('value', 
-                '右トリガーを押すと検査開始\n\n見えたら右トリガー\n見えなかったら左トリガー');
+                '右トリガーを押すと検査開始\n\n緑色に変わった数字があったら右トリガー\n何も変わらなかったら左トリガー');
             
-            // すべての数字を非表示に
+            // すべての数字を白色に戻す
             Object.values(numberEntities).forEach(entity => {
-                entity.setAttribute('visible', 'false');
+                entity.setAttribute('color', normalColor);
             });
         }
 
@@ -391,21 +395,21 @@
             const rightController = document.getElementById('rightController');
             const leftController = document.getElementById('leftController');
             
-            // 右トリガー: 待機中なら検査開始、検査中なら「見えた」
+            // 右トリガー: 待機中なら検査開始、検査中なら「色変化を検出」
             rightController.addEventListener('triggerdown', function() {
                 if (!testRunning && !waitingForResponse) {
                     // 待機中なら検査開始
                     startTest();
                 } else if (testRunning && waitingForResponse) {
-                    // 検査中なら「見えた」
-                    recordResponse('seen');
+                    // 検査中なら「色変化を検出した」
+                    recordResponse('detected');
                 }
             });
             
-            // 左トリガー: 検査中なら「見えなかった」
+            // 左トリガー: 検査中なら「色変化を見落とした」
             leftController.addEventListener('triggerdown', function() {
                 if (testRunning && waitingForResponse) {
-                    recordResponse('not-seen');
+                    recordResponse('missed');
                 }
             });
             
@@ -421,9 +425,9 @@
                     startTest();
                 } else if (testRunning && waitingForResponse) {
                     if (e.key === 'ArrowRight' || e.key === 's') {
-                        recordResponse('seen');
+                        recordResponse('detected');
                     } else if (e.key === 'ArrowLeft' || e.key === 'n') {
-                        recordResponse('not-seen');
+                        recordResponse('missed');
                     }
                 }
             });
